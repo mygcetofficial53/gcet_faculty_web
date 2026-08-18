@@ -38,6 +38,8 @@ func NewGMSScraper(baseURL string) *GMSScraper {
 	jar, _ := cookiejar.New(nil)
 	
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// Force disable HTTP/2 to prevent "http2: unsupported scheme" errors with proxies
+	transport.ForceAttemptHTTP2 = false
 	
 	var proxyURLStr string
 	
@@ -50,6 +52,10 @@ func NewGMSScraper(baseURL string) *GMSScraper {
 	}
 
 	if proxyURLStr != "" {
+		// Convert https proxy scheme to http to avoid http2 issues
+		if strings.HasPrefix(strings.ToLower(proxyURLStr), "https://") {
+			proxyURLStr = "http://" + proxyURLStr[8:]
+		}
 		if proxyURL, err := url.Parse(proxyURLStr); err == nil {
 			transport.Proxy = http.ProxyURL(proxyURL)
 			logger.Log.Infof("GMS Scraper configured to use proxy: %s", proxyURLStr)
