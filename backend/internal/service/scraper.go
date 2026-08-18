@@ -39,8 +39,17 @@ func NewGMSScraper(baseURL string) *GMSScraper {
 	
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	
-	// Check if PROXY_URL environment variable is set
-	if proxyURLStr := os.Getenv("PROXY_URL"); proxyURLStr != "" {
+	var proxyURLStr string
+	
+	// Check if a static proxy is provided
+	if staticProxy := os.Getenv("PROXY_URL"); staticProxy != "" {
+		proxyURLStr = staticProxy
+	} else if GlobalProxyPool != nil {
+		// Otherwise, get a random proxy from the pool
+		proxyURLStr = GlobalProxyPool.GetRandomProxy()
+	}
+
+	if proxyURLStr != "" {
 		if proxyURL, err := url.Parse(proxyURLStr); err == nil {
 			transport.Proxy = http.ProxyURL(proxyURL)
 			logger.Log.Infof("GMS Scraper configured to use proxy: %s", proxyURLStr)

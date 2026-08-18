@@ -40,6 +40,9 @@ func main() {
 		logger.Log.Info("Supabase connection established")
 	}
 
+	// Initialize Proxy Pool
+	service.InitProxyPool(cfg.ProxyListURL)
+
 	// 4. Initialize Services
 	authSvc := service.NewAuthService(cfg)
 

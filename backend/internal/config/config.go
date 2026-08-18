@@ -23,6 +23,7 @@ type Config struct {
 	RateLimitRPS       int
 	LogLevel           string
 	Environment        string
+	ProxyListURL       string
 }
 
 // Load reads configuration from environment variables
@@ -43,6 +44,7 @@ func Load() (*Config, error) {
 		RateLimitRPS:       getEnvInt("RATE_LIMIT_RPS", 10),
 		LogLevel:           getEnv("LOG_LEVEL", "info"),
 		Environment:        getEnv("ENVIRONMENT", "development"),
+		ProxyListURL:       getEnv("PROXY_LIST_URL", ""),
 	}
 
 	if cfg.JWTSecret == "" {
