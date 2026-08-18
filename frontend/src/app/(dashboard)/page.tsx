@@ -1,7 +1,7 @@
 "use client";
 
 import { useAuthStore } from "@/store/useAuthStore";
-import { motion } from "framer-motion";
+import { motion, Variants } from "framer-motion";
 import { Calendar, ClipboardCheck, BarChart3, Clock, ArrowRight, BookOpen, Users } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
@@ -21,7 +21,7 @@ export default function DashboardPage() {
     setDate(format(new Date(), "EEEE, MMMM d, yyyy"));
   }, []);
 
-  const container = {
+  const container: Variants = {
     hidden: { opacity: 0 },
     show: {
       opacity: 1,
@@ -29,7 +29,7 @@ export default function DashboardPage() {
     }
   };
 
-  const item = {
+  const item: Variants = {
     hidden: { opacity: 0, y: 15 },
     show: { 
       opacity: 1, 
