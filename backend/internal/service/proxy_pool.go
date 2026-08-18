@@ -104,11 +104,17 @@ func (p *ProxyPool) fetchProxies() {
 		}
 
 		proxyLower := strings.ToLower(proxy)
-		// Go's net/http transport supports http, https, and socks5
+		
+		// Go's http.Transport struggles with https:// proxies if they don't support HTTP/2 proxying
+		// Convert https:// to http:// for the proxy scheme.
+		if strings.HasPrefix(proxyLower, "https://") {
+			proxy = "http://" + proxy[8:]
+			proxyLower = "http://" + proxyLower[8:]
+		}
+
+		// Go's net/http transport supports http and socks5
 		// We explicitly ignore socks4 since it will cause "unsupported protocol scheme"
-		if strings.HasPrefix(proxyLower, "http://") || 
-		   strings.HasPrefix(proxyLower, "https://") || 
-		   strings.HasPrefix(proxyLower, "socks5://") {
+		if strings.HasPrefix(proxyLower, "http://") || strings.HasPrefix(proxyLower, "socks5://") {
 			validProxies = append(validProxies, proxy)
 		}
 	}
