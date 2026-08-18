@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -35,9 +36,21 @@ type GMSScraper struct {
 // NewGMSScraper creates a new scraper instance for a faculty session
 func NewGMSScraper(baseURL string) *GMSScraper {
 	jar, _ := cookiejar.New(nil)
+	
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	
+	// Check if PROXY_URL environment variable is set
+	if proxyURLStr := os.Getenv("PROXY_URL"); proxyURLStr != "" {
+		if proxyURL, err := url.Parse(proxyURLStr); err == nil {
+			transport.Proxy = http.ProxyURL(proxyURL)
+			logger.Log.Infof("GMS Scraper configured to use proxy: %s", proxyURLStr)
+		}
+	}
+	
 	client := &http.Client{
-		Jar:     jar,
-		Timeout: 60 * time.Second,
+		Transport: transport,
+		Jar:       jar,
+		Timeout:   60 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 5 {
 				return fmt.Errorf("too many redirects")
