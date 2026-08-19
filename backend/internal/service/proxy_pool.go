@@ -2,9 +2,11 @@ package service
 
 import (
 	"context"
+	"crypto/tls"
 	"io"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -43,7 +45,7 @@ func InitProxyPool(listURL string) {
 	// Fetch immediately on startup
 	GlobalProxyPool.fetchProxies()
 
-	// Fetch periodically every 10 minutes
+	// Fetch periodically every 15 minutes
 	go GlobalProxyPool.startRotation()
 }
 
@@ -55,7 +57,7 @@ func StopProxyPool() {
 }
 
 func (p *ProxyPool) startRotation() {
-	ticker := time.NewTicker(10 * time.Minute)
+	ticker := time.NewTicker(15 * time.Minute)
 	defer ticker.Stop()
 
 	for {
@@ -90,7 +92,7 @@ func (p *ProxyPool) fetchProxies() {
 	}
 
 	lines := strings.Split(string(bodyBytes), "\n")
-	var validProxies []string
+	var candidateProxies []string
 
 	for _, line := range lines {
 		proxy := strings.TrimSpace(line)
@@ -98,35 +100,93 @@ func (p *ProxyPool) fetchProxies() {
 			continue
 		}
 		
-		// Ensure it has a scheme. If not, assume http.
 		if !strings.Contains(proxy, "://") {
 			proxy = "http://" + proxy
 		}
 
 		proxyLower := strings.ToLower(proxy)
 		
-		// Go's http.Transport struggles with https:// proxies if they don't support HTTP/2 proxying
-		// Convert https:// to http:// for the proxy scheme.
 		if strings.HasPrefix(proxyLower, "https://") {
 			proxy = "http://" + proxy[8:]
 			proxyLower = "http://" + proxyLower[8:]
 		}
 
-		// Go's net/http transport supports http and socks5
-		// We explicitly ignore socks4 since it will cause "unsupported protocol scheme"
 		if strings.HasPrefix(proxyLower, "http://") || strings.HasPrefix(proxyLower, "socks5://") {
-			validProxies = append(validProxies, proxy)
+			candidateProxies = append(candidateProxies, proxy)
 		}
 	}
+
+	logger.Log.Infof("ProxyPool: Fetched %d candidate proxies. Starting health checks...", len(candidateProxies))
+	
+	// Test the proxies in the background so we don't block
+	go p.testAndSetProxies(candidateProxies)
+}
+
+func (p *ProxyPool) testAndSetProxies(candidates []string) {
+	var validProxies []string
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	// Limit concurrency to 50 parallel checks
+	semaphore := make(chan struct{}, 50)
+
+	for _, proxy := range candidates {
+		wg.Add(1)
+		go func(px string) {
+			defer wg.Done()
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			if checkProxyHealth(px) {
+				mu.Lock()
+				validProxies = append(validProxies, px)
+				mu.Unlock()
+			}
+		}(proxy)
+	}
+
+	wg.Wait()
 
 	if len(validProxies) > 0 {
 		p.mu.Lock()
 		p.proxies = validProxies
 		p.mu.Unlock()
-		logger.Log.Infof("ProxyPool: loaded %d valid proxies", len(validProxies))
+		logger.Log.Infof("ProxyPool: Kept %d healthy, fast proxies from the candidate list", len(validProxies))
 	} else {
-		logger.Log.Warn("ProxyPool: fetched list contained 0 valid proxies")
+		logger.Log.Warn("ProxyPool: ALL candidate proxies were dead or too slow! Keeping old list if available.")
 	}
+}
+
+func checkProxyHealth(proxyStr string) bool {
+	proxyURL, err := url.Parse(proxyStr)
+	if err != nil {
+		return false
+	}
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = http.ProxyURL(proxyURL)
+	transport.ForceAttemptHTTP2 = false
+	transport.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
+	
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   5 * time.Second, // VERY aggressive timeout. Must be fast!
+	}
+
+	req, err := http.NewRequest("HEAD", "http://202.129.240.148:8080/GIS", nil)
+	if err != nil {
+		return false
+	}
+	
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	return resp.StatusCode == 200 || resp.StatusCode == 302 // GMS returns 200 or 302
 }
 
 // GetRandomProxy returns a random proxy from the pool, or empty string if pool is empty
