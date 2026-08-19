@@ -116,9 +116,14 @@ func (p *ProxyPool) fetchProxies() {
 		}
 	}
 
-	logger.Log.Infof("ProxyPool: Fetched %d candidate proxies. Starting health checks...", len(candidateProxies))
+	logger.Log.Infof("ProxyPool: Fetched %d candidate proxies. Setting them immediately and starting health checks...", len(candidateProxies))
 	
-	// Test the proxies in the background so we don't block
+	// Set candidates immediately so the scraper has proxies to use right away
+	p.mu.Lock()
+	p.proxies = candidateProxies
+	p.mu.Unlock()
+
+	// Then refine the list in the background by health-checking
 	go p.testAndSetProxies(candidateProxies)
 }
 
@@ -170,7 +175,7 @@ func checkProxyHealth(proxyStr string) bool {
 	
 	client := &http.Client{
 		Transport: transport,
-		Timeout:   5 * time.Second, // VERY aggressive timeout. Must be fast!
+		Timeout:   15 * time.Second, // Give free proxies enough time to respond
 	}
 
 	req, err := http.NewRequest("HEAD", "http://202.129.240.148:8080/GIS", nil)
