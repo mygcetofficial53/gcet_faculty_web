@@ -2,6 +2,7 @@ package service
 
 import (
 	"crypto/md5"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
@@ -40,6 +41,7 @@ func NewGMSScraper(baseURL string) *GMSScraper {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	// Force disable HTTP/2 to prevent "http2: unsupported scheme" errors with proxies
 	transport.ForceAttemptHTTP2 = false
+	transport.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
 	
 	var proxyURLStr string
 	
