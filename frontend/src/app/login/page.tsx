@@ -5,6 +5,7 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
 import { api } from "@/lib/api";
+import Cookies from 'js-cookie';
 import { useAuthStore } from "@/store/useAuthStore";
 import { useRouter } from "next/navigation";
 import { FloatingBackground } from "@/components/ui/floating-background";
@@ -41,6 +42,13 @@ export default function LoginPage() {
     try {
       const res = await api.post("/auth/login", data);
       if (res.data.success) {
+        // Store JWT tokens in cookies for authenticated API calls
+        if (res.data.token) {
+          Cookies.set('token', res.data.token, { secure: true, sameSite: 'strict' });
+        }
+        if (res.data.refresh_token) {
+          Cookies.set('refresh_token', res.data.refresh_token, { secure: true, sameSite: 'strict' });
+        }
         setAuth(res.data.faculty);
         router.push("/");
       } else {
