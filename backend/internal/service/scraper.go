@@ -39,35 +39,24 @@ func NewGMSScraper(baseURL string) *GMSScraper {
 	jar, _ := cookiejar.New(nil)
 	
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	// Force disable HTTP/2 to prevent "http2: unsupported scheme" errors with proxies
 	transport.ForceAttemptHTTP2 = false
 	transport.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
 	
-	var proxyURLStr string
-	
-	// Check if a static proxy is provided
+	// If a static proxy is provided, use it as fallback
 	if staticProxy := os.Getenv("PROXY_URL"); staticProxy != "" {
-		proxyURLStr = staticProxy
-	} else if GlobalProxyPool != nil {
-		// Otherwise, get a random proxy from the pool
-		proxyURLStr = GlobalProxyPool.GetRandomProxy()
-	}
-
-	if proxyURLStr != "" {
-		// Convert https proxy scheme to http to avoid http2 issues
-		if strings.HasPrefix(strings.ToLower(proxyURLStr), "https://") {
-			proxyURLStr = "http://" + proxyURLStr[8:]
+		if strings.HasPrefix(strings.ToLower(staticProxy), "https://") {
+			staticProxy = "http://" + staticProxy[8:]
 		}
-		if proxyURL, err := url.Parse(proxyURLStr); err == nil {
+		if proxyURL, err := url.Parse(staticProxy); err == nil {
 			transport.Proxy = http.ProxyURL(proxyURL)
-			logger.Log.Infof("GMS Scraper configured to use proxy: %s", proxyURLStr)
+			logger.Log.Infof("GMS Scraper configured with static proxy: %s", staticProxy)
 		}
 	}
 	
 	client := &http.Client{
 		Transport: transport,
 		Jar:       jar,
-		Timeout:   60 * time.Second,
+		Timeout:   20 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 5 {
 				return fmt.Errorf("too many redirects")
@@ -235,136 +224,86 @@ func (s *GMSScraper) Logout() {
 	s.cookieJar = jar
 }
 
-// doGet performs a GET request and returns the response body
+// doGet performs a GET request, using the racing proxy engine if available
 func (s *GMSScraper) doGet(targetURL string) (string, error) {
-	const maxRetries = 5
-	var lastErr error
-
-	for i := 0; i < maxRetries; i++ {
-		req, err := http.NewRequest("GET", targetURL, nil)
-		if err != nil {
-			return "", err
-		}
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
-
-		resp, err := s.client.Do(req)
-		if err == nil {
-			bodyBytes, readErr := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if readErr == nil {
-				return string(bodyBytes), nil
-			}
-			lastErr = readErr
-		} else {
-			lastErr = err
-		}
-
-		logger.Log.Warnf("GMS Scraper: GET failed (attempt %d/%d): %v", i+1, maxRetries, lastErr)
-		
-		// If we have the proxy pool, switch proxy before retrying
-		if GlobalProxyPool != nil {
-			if newProxyStr := GlobalProxyPool.GetRandomProxy(); newProxyStr != "" {
-				if newProxy, parseErr := url.Parse(newProxyStr); parseErr == nil {
-					if transport, ok := s.client.Transport.(*http.Transport); ok {
-						transport.Proxy = http.ProxyURL(newProxy)
-						logger.Log.Infof("GMS Scraper: Switched proxy to %s", newProxyStr)
-					}
-				}
-			}
-		}
-		time.Sleep(500 * time.Millisecond)
+	// If proxy pool is available, use the racing engine
+	if GlobalProxyPool != nil {
+		return GlobalProxyPool.RaceGet(targetURL, s.cookieJar, 3)
 	}
 
-	return "", fmt.Errorf("GET failed after %d retries: %v", maxRetries, lastErr)
+	// Fallback: use the scraper's own client (static proxy or direct)
+	req, err := http.NewRequest("GET", targetURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return string(bodyBytes), nil
 }
 
-// doPost performs a POST request with form data and returns the response body
+// doPost performs a POST request with form data, using the racing engine if available
 func (s *GMSScraper) doPost(targetURL string, form url.Values) (string, error) {
-	const maxRetries = 5
-	var lastErr error
-
-	for i := 0; i < maxRetries; i++ {
-		req, err := http.NewRequest("POST", targetURL, strings.NewReader(form.Encode()))
-		if err != nil {
-			return "", err
-		}
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		req.Header.Set("Referer", targetURL)
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-
-		resp, err := s.client.Do(req)
-		if err == nil {
-			bodyBytes, readErr := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if readErr == nil {
-				return string(bodyBytes), nil
-			}
-			lastErr = readErr
-		} else {
-			lastErr = err
-		}
-
-		logger.Log.Warnf("GMS Scraper: POST failed (attempt %d/%d): %v", i+1, maxRetries, lastErr)
-		
-		if GlobalProxyPool != nil {
-			if newProxyStr := GlobalProxyPool.GetRandomProxy(); newProxyStr != "" {
-				if newProxy, parseErr := url.Parse(newProxyStr); parseErr == nil {
-					if transport, ok := s.client.Transport.(*http.Transport); ok {
-						transport.Proxy = http.ProxyURL(newProxy)
-						logger.Log.Infof("GMS Scraper: Switched proxy to %s", newProxyStr)
-					}
-				}
-			}
-		}
-		time.Sleep(500 * time.Millisecond)
+	if GlobalProxyPool != nil {
+		return GlobalProxyPool.RacePost(targetURL, "application/x-www-form-urlencoded", form.Encode(), s.cookieJar, 3)
 	}
 
-	return "", fmt.Errorf("POST failed after %d retries: %v", maxRetries, lastErr)
+	req, err := http.NewRequest("POST", targetURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Referer", targetURL)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return string(bodyBytes), nil
 }
 
-// doPostRaw posts a raw body string (not url.Values)
+// doPostRaw posts a raw body string (not url.Values), using the racing engine if available
 func (s *GMSScraper) doPostRaw(targetURL string, body string) (string, error) {
-	const maxRetries = 5
-	var lastErr error
-
-	for i := 0; i < maxRetries; i++ {
-		req, err := http.NewRequest("POST", targetURL, strings.NewReader(body))
-		if err != nil {
-			return "", err
-		}
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		req.Header.Set("Referer", targetURL)
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-
-		resp, err := s.client.Do(req)
-		if err == nil {
-			bodyBytes, readErr := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if readErr == nil {
-				return string(bodyBytes), nil
-			}
-			lastErr = readErr
-		} else {
-			lastErr = err
-		}
-
-		logger.Log.Warnf("GMS Scraper: POST Raw failed (attempt %d/%d): %v", i+1, maxRetries, lastErr)
-		
-		if GlobalProxyPool != nil {
-			if newProxyStr := GlobalProxyPool.GetRandomProxy(); newProxyStr != "" {
-				if newProxy, parseErr := url.Parse(newProxyStr); parseErr == nil {
-					if transport, ok := s.client.Transport.(*http.Transport); ok {
-						transport.Proxy = http.ProxyURL(newProxy)
-						logger.Log.Infof("GMS Scraper: Switched proxy to %s", newProxyStr)
-					}
-				}
-			}
-		}
-		time.Sleep(500 * time.Millisecond)
+	if GlobalProxyPool != nil {
+		return GlobalProxyPool.RacePost(targetURL, "application/x-www-form-urlencoded", body, s.cookieJar, 3)
 	}
 
-	return "", fmt.Errorf("POST Raw failed after %d retries: %v", maxRetries, lastErr)
+	req, err := http.NewRequest("POST", targetURL, strings.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Referer", targetURL)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return string(bodyBytes), nil
 }
 
 // getWithRetry performs GET with auto-relogin on session expiry
