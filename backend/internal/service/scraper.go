@@ -151,31 +151,16 @@ func (s *GMSScraper) Login(username, password string) (*models.Faculty, error) {
 		return nil, fmt.Errorf("failed to load login page: %w", err)
 	}
 
-	// Step 2: POST login form
+	// Step 2: POST login form using racing engine
 	form := url.Values{
 		"login_id": {username},
 		"pass":     {passwordMD5},
 	}
 
-	req, err := http.NewRequest("POST", s.loginActionURL(), strings.NewReader(form.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create login request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Referer", s.loginPageURL())
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-
-	resp, err := s.client.Do(req)
+	body, err := s.doPost(s.loginActionURL(), form)
 	if err != nil {
 		return nil, fmt.Errorf("login request failed: %w", err)
 	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read login response: %w", err)
-	}
-	body := string(bodyBytes)
 	bodyLower := strings.ToLower(body)
 
 	// Check if login form is still showing (login failed)
