@@ -132,8 +132,8 @@ func (p *ProxyPool) testAndSetProxies(candidates []string) {
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
-	// Limit concurrency to 50 parallel checks
-	semaphore := make(chan struct{}, 50)
+	// Limit concurrency to 5 parallel checks to avoid connection limits
+	semaphore := make(chan struct{}, 5)
 
 	for _, proxy := range candidates {
 		wg.Add(1)
