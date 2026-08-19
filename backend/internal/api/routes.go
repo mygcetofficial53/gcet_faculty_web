@@ -50,7 +50,7 @@ func RegisterRoutes(r chi.Router, cfg *config.Config, authSvc *service.AuthServi
 		// Protected Routes
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.AuthMiddleware(authSvc))
-			r.Use(middleware.RequestTimeout(30 * time.Second))
+			r.Use(middleware.RequestTimeout(120 * time.Second))
 
 			// Auth
 			r.Post("/auth/logout", h.Logout)
