@@ -221,19 +221,31 @@ func makeProxyClient(proxyStr string, jar *cookiejar.Jar, timeout time.Duration)
 	}
 }
 
+// cloneCookies creates a new cookie jar and copies cookies for a specific URL
+func cloneCookies(src http.CookieJar, targetStr string) http.CookieJar {
+	newJar, _ := cookiejar.New(nil)
+	if src != nil {
+		if parsed, err := url.Parse(targetStr); err == nil {
+			newJar.SetCookies(parsed, src.Cookies(parsed))
+		}
+	}
+	return newJar
+}
+
 // RaceGet fires a GET request through multiple proxies simultaneously.
 // The first successful response wins; all others are cancelled.
-func (p *ProxyPool) RaceGet(targetURL string, jar *cookiejar.Jar, numRacers int) (string, error) {
+func (p *ProxyPool) RaceGet(targetURL string, jar http.CookieJar, numRacers int) (string, error) {
 	candidates := p.getBestProxies(numRacers)
 	if len(candidates) == 0 {
 		return "", fmt.Errorf("no proxies available in pool")
 	}
 
 	type raceResult struct {
-		body  string
-		proxy *ProxyEntry
-		dur   time.Duration
-		err   error
+		body     string
+		proxy    *ProxyEntry
+		dur      time.Duration
+		err      error
+		racerJar http.CookieJar
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -244,7 +256,8 @@ func (p *ProxyPool) RaceGet(targetURL string, jar *cookiejar.Jar, numRacers int)
 	for _, entry := range candidates {
 		go func(pe *ProxyEntry) {
 			start := time.Now()
-			client := makeProxyClient(pe.URL, jar, 20*time.Second)
+			racerJar := cloneCookies(jar, targetURL)
+			client := makeProxyClient(pe.URL, racerJar, 20*time.Second)
 
 			req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
 			if err != nil {
@@ -267,7 +280,7 @@ func (p *ProxyPool) RaceGet(targetURL string, jar *cookiejar.Jar, numRacers int)
 				return
 			}
 
-			resultCh <- raceResult{body: string(bodyBytes), proxy: pe, dur: time.Since(start)}
+			resultCh <- raceResult{body: string(bodyBytes), proxy: pe, dur: time.Since(start), racerJar: racerJar}
 		}(entry)
 	}
 
@@ -279,6 +292,14 @@ func (p *ProxyPool) RaceGet(targetURL string, jar *cookiejar.Jar, numRacers int)
 			// SUCCESS! Record the win and cancel others
 			atomic.AddInt32(&res.proxy.Successes, 1)
 			atomic.StoreInt64(&res.proxy.AvgMs, res.dur.Milliseconds())
+			
+			// Merge winner's cookies back to main jar
+			if jar != nil {
+				if parsed, err := url.Parse(targetURL); err == nil {
+					jar.SetCookies(parsed, res.racerJar.Cookies(parsed))
+				}
+			}
+
 			cancel() // Cancel all other racers
 			logger.Log.Infof("ProxyPool RACE: Winner %s responded in %dms", res.proxy.URL, res.dur.Milliseconds())
 			return res.body, nil
@@ -292,17 +313,18 @@ func (p *ProxyPool) RaceGet(targetURL string, jar *cookiejar.Jar, numRacers int)
 }
 
 // RacePost fires a POST request through multiple proxies simultaneously.
-func (p *ProxyPool) RacePost(targetURL string, contentType string, body string, jar *cookiejar.Jar, numRacers int) (string, error) {
+func (p *ProxyPool) RacePost(targetURL string, contentType string, body string, jar http.CookieJar, numRacers int) (string, error) {
 	candidates := p.getBestProxies(numRacers)
 	if len(candidates) == 0 {
 		return "", fmt.Errorf("no proxies available in pool")
 	}
 
 	type raceResult struct {
-		body  string
-		proxy *ProxyEntry
-		dur   time.Duration
-		err   error
+		body     string
+		proxy    *ProxyEntry
+		dur      time.Duration
+		err      error
+		racerJar http.CookieJar
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -313,7 +335,8 @@ func (p *ProxyPool) RacePost(targetURL string, contentType string, body string, 
 	for _, entry := range candidates {
 		go func(pe *ProxyEntry) {
 			start := time.Now()
-			client := makeProxyClient(pe.URL, jar, 20*time.Second)
+			racerJar := cloneCookies(jar, targetURL)
+			client := makeProxyClient(pe.URL, racerJar, 20*time.Second)
 
 			req, err := http.NewRequestWithContext(ctx, "POST", targetURL, strings.NewReader(body))
 			if err != nil {
@@ -337,7 +360,7 @@ func (p *ProxyPool) RacePost(targetURL string, contentType string, body string, 
 				return
 			}
 
-			resultCh <- raceResult{body: string(bodyBytes), proxy: pe, dur: time.Since(start)}
+			resultCh <- raceResult{body: string(bodyBytes), proxy: pe, dur: time.Since(start), racerJar: racerJar}
 		}(entry)
 	}
 
@@ -347,6 +370,14 @@ func (p *ProxyPool) RacePost(targetURL string, contentType string, body string, 
 		if res.err == nil {
 			atomic.AddInt32(&res.proxy.Successes, 1)
 			atomic.StoreInt64(&res.proxy.AvgMs, res.dur.Milliseconds())
+			
+			// Merge winner's cookies back to main jar
+			if jar != nil {
+				if parsed, err := url.Parse(targetURL); err == nil {
+					jar.SetCookies(parsed, res.racerJar.Cookies(parsed))
+				}
+			}
+
 			cancel()
 			logger.Log.Infof("ProxyPool RACE: Winner %s responded in %dms", res.proxy.URL, res.dur.Milliseconds())
 			return res.body, nil
