@@ -45,9 +45,11 @@ export default function LoginPage() {
         // Store JWT tokens in cookies for authenticated API calls
         if (res.data.token) {
           Cookies.set('token', res.data.token, { secure: true, sameSite: 'strict' });
+          localStorage.setItem('token', res.data.token);
         }
         if (res.data.refresh_token) {
           Cookies.set('refresh_token', res.data.refresh_token, { secure: true, sameSite: 'strict' });
+          localStorage.setItem('refresh_token', res.data.refresh_token);
         }
         setAuth(res.data.faculty);
         router.push("/");
