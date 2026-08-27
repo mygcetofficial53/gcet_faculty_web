@@ -429,3 +429,23 @@ func (h *Handler) HealthCheck(w http.ResponseWriter, r *http.Request) {
 		"time":   time.Now().Format(time.RFC3339),
 	})
 }
+
+// ProxyStatus returns the proxy pool health and discovery stats
+func (h *Handler) ProxyStatus(w http.ResponseWriter, r *http.Request) {
+	var poolStats *service.ProxyHealthStats
+	if service.GlobalProxyPool != nil {
+		stats := service.GlobalProxyPool.GetHealthStats()
+		poolStats = &stats
+	}
+
+	discoveryStats := service.GetDiscoveryStats()
+
+	writeJSON(w, http.StatusOK, models.APIResponse{
+		Success: true,
+		Data: map[string]interface{}{
+			"pool":      poolStats,
+			"discovery": discoveryStats,
+		},
+	})
+}
+

@@ -15,7 +15,8 @@ import {
   Heart,
   Info,
   LogOut,
-  GraduationCap
+  GraduationCap,
+  Shield
 } from "lucide-react";
 import { useAuthStore } from "@/store/useAuthStore";
 import { api } from "@/lib/api";
@@ -26,6 +27,7 @@ const routes = [
   { label: "Timetable", icon: Calendar, href: "/timetable" },
   { label: "Attendance", icon: ClipboardCheck, href: "/attendance" },
   { label: "Analytics", icon: BarChart3, href: "/analytics" },
+  { label: "Proxy Tunnel", icon: Shield, href: "/proxy-status" },
 ];
 
 const bottomRoutes = [

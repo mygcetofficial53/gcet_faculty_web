@@ -206,7 +206,7 @@ func (p *ProxyPool) GetRandomProxy() string {
 }
 
 // makeProxyClient creates an http.Client configured to use a specific proxy
-func makeProxyClient(proxyStr string, jar *cookiejar.Jar, timeout time.Duration) *http.Client {
+func makeProxyClient(proxyStr string, jar http.CookieJar, timeout time.Duration) *http.Client {
 	proxyURL, _ := url.Parse(proxyStr)
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -388,3 +388,151 @@ func (p *ProxyPool) RacePost(targetURL string, contentType string, body string, 
 
 	return "", fmt.Errorf("all %d proxy racers failed: %v", len(candidates), errors[len(errors)-1])
 }
+
+// --- New methods for proxy discovery integration ---
+
+// ProxyHealthStats holds stats for the proxy status API
+type ProxyHealthStats struct {
+	TotalProxies  int              `json:"total_proxies"`
+	HealthyCount  int              `json:"healthy_count"`
+	DegradedCount int              `json:"degraded_count"`
+	DeadCount     int              `json:"dead_count"`
+	AvgLatencyMs  int64            `json:"avg_latency_ms"`
+	TopProxies    []ProxyInfoEntry `json:"top_proxies"`
+}
+
+// ProxyInfoEntry is a sanitized proxy entry for API responses
+type ProxyInfoEntry struct {
+	URL           string  `json:"url"`
+	Successes     int32   `json:"successes"`
+	Failures      int32   `json:"failures"`
+	AvgMs         int64   `json:"avg_ms"`
+	SuccessRate   float64 `json:"success_rate"`
+	Status        string  `json:"status"` // "healthy", "degraded", "dead"
+}
+
+// AddProxies merges new proxy entries into the pool, deduplicating by URL
+func (p *ProxyPool) AddProxies(entries []*ProxyEntry) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Build a set of existing proxy URLs
+	existing := make(map[string]bool, len(p.proxies))
+	for _, pe := range p.proxies {
+		existing[pe.URL] = true
+	}
+
+	added := 0
+	for _, entry := range entries {
+		if !existing[entry.URL] {
+			p.proxies = append(p.proxies, entry)
+			existing[entry.URL] = true
+			added++
+		}
+	}
+
+	if added > 0 {
+		logger.Log.Infof("ProxyPool: Merged %d new proxies (total: %d)", added, len(p.proxies))
+	}
+}
+
+// RemoveDeadProxies removes proxies with failures exceeding the threshold
+func (p *ProxyPool) RemoveDeadProxies(failureThreshold int32) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	var alive []*ProxyEntry
+	removed := 0
+	for _, pe := range p.proxies {
+		failures := atomic.LoadInt32(&pe.Failures)
+		successes := atomic.LoadInt32(&pe.Successes)
+		// Remove if failures exceed threshold AND success rate is below 20%
+		if failures > failureThreshold && (successes == 0 || float64(successes)/float64(successes+failures) < 0.2) {
+			removed++
+			continue
+		}
+		alive = append(alive, pe)
+	}
+	p.proxies = alive
+
+	if removed > 0 {
+		logger.Log.Infof("ProxyPool: Pruned %d dead proxies (remaining: %d)", removed, len(p.proxies))
+	}
+}
+
+// GetHealthStats returns comprehensive pool health statistics
+func (p *ProxyPool) GetHealthStats() ProxyHealthStats {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	stats := ProxyHealthStats{}
+	stats.TotalProxies = len(p.proxies)
+
+	var totalLatency int64
+	var latencyCount int64
+
+	for _, pe := range p.proxies {
+		successes := atomic.LoadInt32(&pe.Successes)
+		failures := atomic.LoadInt32(&pe.Failures)
+		avgMs := atomic.LoadInt64(&pe.AvgMs)
+
+		total := successes + failures
+		var successRate float64
+		status := "healthy"
+
+		if total > 0 {
+			successRate = float64(successes) / float64(total)
+			if successRate < 0.3 {
+				status = "dead"
+				stats.DeadCount++
+			} else if successRate < 0.7 {
+				status = "degraded"
+				stats.DegradedCount++
+			} else {
+				stats.HealthyCount++
+			}
+		} else {
+			// Untested proxy — count as healthy (just discovered)
+			stats.HealthyCount++
+		}
+
+		if avgMs > 0 {
+			totalLatency += avgMs
+			latencyCount++
+		}
+
+		// Add to top proxies (we'll sort and limit later)
+		stats.TopProxies = append(stats.TopProxies, ProxyInfoEntry{
+			URL:         pe.URL,
+			Successes:   successes,
+			Failures:    failures,
+			AvgMs:       avgMs,
+			SuccessRate: successRate,
+			Status:      status,
+		})
+	}
+
+	if latencyCount > 0 {
+		stats.AvgLatencyMs = totalLatency / latencyCount
+	}
+
+	// Sort top proxies: healthy first, then by success rate desc
+	sort.Slice(stats.TopProxies, func(i, j int) bool {
+		si := stats.TopProxies[i]
+		sj := stats.TopProxies[j]
+		// Healthy > Degraded > Dead
+		statusOrder := map[string]int{"healthy": 0, "degraded": 1, "dead": 2}
+		if statusOrder[si.Status] != statusOrder[sj.Status] {
+			return statusOrder[si.Status] < statusOrder[sj.Status]
+		}
+		return si.SuccessRate > sj.SuccessRate
+	})
+
+	// Limit to top 20
+	if len(stats.TopProxies) > 20 {
+		stats.TopProxies = stats.TopProxies[:20]
+	}
+
+	return stats
+}
+

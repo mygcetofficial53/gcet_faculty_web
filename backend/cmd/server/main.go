@@ -43,6 +43,17 @@ func main() {
 	// Initialize Proxy Pool
 	service.InitProxyPool(cfg.ProxyListURL)
 
+	// Start Indian Proxy Auto-Discovery Engine
+	if cfg.ProxyAutoDiscover {
+		service.StartProxyDiscovery(
+			cfg.GMSPortalURL,
+			service.GlobalProxyPool,
+			15*time.Minute,
+			cfg.ProxyHealthCheckInterval,
+		)
+		logger.Log.Info("🇮🇳 Indian Proxy Auto-Discovery Engine started")
+	}
+
 	// 4. Initialize Services
 	authSvc := service.NewAuthService(cfg)
 
@@ -72,6 +83,10 @@ func main() {
 	<-quit
 
 	logger.Log.Info("Server is shutting down...")
+
+	// Stop proxy discovery engine
+	service.StopProxyDiscovery()
+	service.StopProxyPool()
 
 	// The context is used to inform the server it has 10 seconds to finish
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -79,6 +79,9 @@ func RegisterRoutes(r chi.Router, cfg *config.Config, authSvc *service.AuthServi
 				r.Get("/avg", h.GetAverageAttendance)
 				r.Post("/student-wise", h.GetStudentWiseAttendance)
 			})
+
+			// Proxy Status
+			r.Get("/proxy/status", h.ProxyStatus)
 		})
 	})
 }

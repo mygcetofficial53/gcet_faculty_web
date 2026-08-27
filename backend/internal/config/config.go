@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -24,6 +25,11 @@ type Config struct {
 	LogLevel           string
 	Environment        string
 	ProxyListURL       string
+
+	// Proxy auto-discovery settings
+	ProxyAutoDiscover       bool
+	ProxyHealthCheckInterval time.Duration
+	ProxyRacerCount         int
 }
 
 // Load reads configuration from environment variables
@@ -45,6 +51,11 @@ func Load() (*Config, error) {
 		LogLevel:           getEnv("LOG_LEVEL", "info"),
 		Environment:        getEnv("ENVIRONMENT", "development"),
 		ProxyListURL:       getEnv("PROXY_LIST_URL", ""),
+
+		// Proxy auto-discovery
+		ProxyAutoDiscover:        getEnvBool("PROXY_AUTO_DISCOVER", true),
+		ProxyHealthCheckInterval: getEnvDuration("PROXY_HEALTH_INTERVAL", 5*time.Minute),
+		ProxyRacerCount:          getEnvInt("PROXY_RACER_COUNT", 5),
 	}
 
 	if cfg.JWTSecret == "" {
@@ -74,6 +85,18 @@ func getEnvDuration(key string, fallback time.Duration) time.Duration {
 	if val := os.Getenv(key); val != "" {
 		if d, err := time.ParseDuration(val); err == nil {
 			return d
+		}
+	}
+	return fallback
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	if val := os.Getenv(key); val != "" {
+		switch strings.ToLower(val) {
+		case "true", "1", "yes":
+			return true
+		case "false", "0", "no":
+			return false
 		}
 	}
 	return fallback
