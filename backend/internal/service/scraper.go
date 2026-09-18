@@ -145,7 +145,13 @@ func (s *GMSScraper) Login(username, password string) (*models.Faculty, error) {
 	// MD5 hash the password (GMS portal JavaScript does calcMD5(pass))
 	passwordMD5 := fmt.Sprintf("%x", md5.Sum([]byte(password)))
 
-	// Step 1: POST login form directly using racing engine
+	// Step 1: GET login page to establish session cookies
+	_, err := s.doGet(s.loginPageURL())
+	if err != nil {
+		return nil, fmt.Errorf("failed to load login page: %w", err)
+	}
+
+	// Step 2: POST login form directly using racing engine
 	form := url.Values{
 		"login_id": {username},
 		"pass":     {passwordMD5},

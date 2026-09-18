@@ -205,7 +205,6 @@ func (p *ProxyPool) GetRandomProxy() string {
 	return entries[0].URL
 }
 
-// makeProxyClient creates an http.Client configured to use a specific proxy
 func makeProxyClient(proxyStr string, jar http.CookieJar, timeout time.Duration) *http.Client {
 	proxyURL, _ := url.Parse(proxyStr)
 
@@ -213,6 +212,11 @@ func makeProxyClient(proxyStr string, jar http.CookieJar, timeout time.Duration)
 	transport.Proxy = http.ProxyURL(proxyURL)
 	transport.ForceAttemptHTTP2 = false
 	transport.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
+
+	// Ensure we don't wait forever for dead proxies
+	if timeout > 8*time.Second {
+		timeout = 8 * time.Second
+	}
 
 	return &http.Client{
 		Transport: transport,
