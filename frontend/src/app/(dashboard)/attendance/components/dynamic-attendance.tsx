@@ -118,7 +118,7 @@ export function DynamicAttendance({ course, date, topic, type, extraLecture, lec
       .channel('attendance_changes')
       .on('postgres_changes', 
         { event: 'INSERT', schema: 'public', table: 'attendance_records', filter: `session_id=eq.${sessionId}` },
-        (payload) => {
+        (payload: any) => {
           const newRecord = payload.new;
           // Find student in our original list
           const studentInfo = students.find(s => s.enrollment === newRecord.student_roll_no);
