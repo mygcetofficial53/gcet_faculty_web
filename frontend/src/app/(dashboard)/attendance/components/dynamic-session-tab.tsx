@@ -29,7 +29,7 @@ export default function DynamicSessionTab() {
   const queryClient = useQueryClient();
 
   // 1. Fetch Courses
-  const { data: courses, isLoading: loadingCourses } = useQuery({
+  const { data: courses, isLoading: loadingCourses, isError: errorCourses, refetch: refetchCourses } = useQuery({
     queryKey: ["attendance-courses"],
     queryFn: async () => {
       const res = await api.get("/attendance/courses");
@@ -58,6 +58,18 @@ export default function DynamicSessionTab() {
 
   if (loadingCourses) {
     return <div className="flex justify-center p-8"><Loader2 className="h-8 w-8 animate-spin text-primary" /></div>;
+  }
+
+  if (errorCourses || !courses) {
+    return (
+      <div className="flex flex-col items-center justify-center py-12 text-center border rounded-xl bg-destructive/5 border-destructive/20">
+        <h3 className="text-lg font-semibold text-destructive mb-2">Failed to load courses</h3>
+        <p className="text-muted-foreground text-sm max-w-md mx-auto mb-4">
+          The GMS portal could not be reached, or there are no courses available.
+        </p>
+        <Button variant="outline" onClick={() => refetchCourses()}>Try Again</Button>
+      </div>
+    );
   }
 
   if (success) {
