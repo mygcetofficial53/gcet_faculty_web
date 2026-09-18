@@ -312,6 +312,25 @@ func (p *ProxyPool) RaceGet(targetURL string, jar http.CookieJar, numRacers int)
 	return "", fmt.Errorf("all %d proxy racers failed: %v", len(candidates), errors[len(errors)-1])
 }
 
+// RetryRaceGet is a wrapper around RaceGet that retries once with fresh proxies on failure.
+func (p *ProxyPool) RetryRaceGet(targetURL string, jar http.CookieJar, numRacers int) (string, error) {
+	body, err := p.RaceGet(targetURL, jar, numRacers)
+	if err == nil {
+		return body, nil
+	}
+
+	logger.Log.Warnf("ProxyPool: All racers failed for GET %s, retrying in 2s with fresh proxies...", targetURL)
+	time.Sleep(2 * time.Second)
+
+	// Trigger emergency discovery if available
+	if GlobalDiscovery != nil {
+		go GlobalDiscovery.discoverAndValidate()
+	}
+
+	// Retry with double the racers
+	return p.RaceGet(targetURL, jar, numRacers*2)
+}
+
 // RacePost fires a POST request through multiple proxies simultaneously.
 func (p *ProxyPool) RacePost(targetURL string, contentType string, body string, jar http.CookieJar, numRacers int) (string, error) {
 	candidates := p.getBestProxies(numRacers)
@@ -387,6 +406,25 @@ func (p *ProxyPool) RacePost(targetURL string, contentType string, body string, 
 	}
 
 	return "", fmt.Errorf("all %d proxy racers failed: %v", len(candidates), errors[len(errors)-1])
+}
+
+// RetryRacePost is a wrapper around RacePost that retries once with fresh proxies on failure.
+func (p *ProxyPool) RetryRacePost(targetURL string, contentType string, body string, jar http.CookieJar, numRacers int) (string, error) {
+	resBody, err := p.RacePost(targetURL, contentType, body, jar, numRacers)
+	if err == nil {
+		return resBody, nil
+	}
+
+	logger.Log.Warnf("ProxyPool: All racers failed for POST %s, retrying in 2s with fresh proxies...", targetURL)
+	time.Sleep(2 * time.Second)
+
+	// Trigger emergency discovery if available
+	if GlobalDiscovery != nil {
+		go GlobalDiscovery.discoverAndValidate()
+	}
+
+	// Retry with double the racers
+	return p.RacePost(targetURL, contentType, body, jar, numRacers*2)
 }
 
 // --- New methods for proxy discovery integration ---

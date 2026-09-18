@@ -27,9 +27,11 @@ type Config struct {
 	ProxyListURL       string
 
 	// Proxy auto-discovery settings
-	ProxyAutoDiscover       bool
-	ProxyHealthCheckInterval time.Duration
-	ProxyRacerCount         int
+	ProxyAutoDiscover         bool
+	ProxyHealthCheckInterval  time.Duration
+	ProxyRacerCount           int
+	ProxyPersistenceEnabled   bool
+	ProxyWarmupTimeout        time.Duration
 }
 
 // Load reads configuration from environment variables
@@ -55,7 +57,9 @@ func Load() (*Config, error) {
 		// Proxy auto-discovery
 		ProxyAutoDiscover:        getEnvBool("PROXY_AUTO_DISCOVER", true),
 		ProxyHealthCheckInterval: getEnvDuration("PROXY_HEALTH_INTERVAL", 5*time.Minute),
-		ProxyRacerCount:          getEnvInt("PROXY_RACER_COUNT", 5),
+		ProxyRacerCount:          getEnvInt("PROXY_RACER_COUNT", 8),
+		ProxyPersistenceEnabled:  getEnvBool("PROXY_PERSISTENCE_ENABLED", true),
+		ProxyWarmupTimeout:       getEnvDuration("PROXY_WARMUP_TIMEOUT", 30*time.Second),
 	}
 
 	if cfg.JWTSecret == "" {

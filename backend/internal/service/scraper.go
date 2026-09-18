@@ -213,7 +213,7 @@ func (s *GMSScraper) Logout() {
 func (s *GMSScraper) doGet(targetURL string) (string, error) {
 	// If proxy pool is available, use the racing engine
 	if GlobalProxyPool != nil {
-		return GlobalProxyPool.RaceGet(targetURL, s.cookieJar, 5)
+		return GlobalProxyPool.RetryRaceGet(targetURL, s.cookieJar, 8)
 	}
 
 	// Fallback: use the scraper's own client (static proxy or direct)
@@ -240,7 +240,7 @@ func (s *GMSScraper) doGet(targetURL string) (string, error) {
 // doPost performs a POST request with form data, using the racing engine if available
 func (s *GMSScraper) doPost(targetURL string, form url.Values) (string, error) {
 	if GlobalProxyPool != nil {
-		return GlobalProxyPool.RacePost(targetURL, "application/x-www-form-urlencoded", form.Encode(), s.cookieJar, 5)
+		return GlobalProxyPool.RetryRacePost(targetURL, "application/x-www-form-urlencoded", form.Encode(), s.cookieJar, 8)
 	}
 
 	req, err := http.NewRequest("POST", targetURL, strings.NewReader(form.Encode()))
@@ -267,7 +267,7 @@ func (s *GMSScraper) doPost(targetURL string, form url.Values) (string, error) {
 // doPostRaw posts a raw body string (not url.Values), using the racing engine if available
 func (s *GMSScraper) doPostRaw(targetURL string, body string) (string, error) {
 	if GlobalProxyPool != nil {
-		return GlobalProxyPool.RacePost(targetURL, "application/x-www-form-urlencoded", body, s.cookieJar, 5)
+		return GlobalProxyPool.RetryRacePost(targetURL, "application/x-www-form-urlencoded", body, s.cookieJar, 8)
 	}
 
 	req, err := http.NewRequest("POST", targetURL, strings.NewReader(body))

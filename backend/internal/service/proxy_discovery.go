@@ -33,6 +33,7 @@ type ProxyDiscovery struct {
 	totalDiscovered    atomic.Int32
 	totalHealthy       atomic.Int32
 	isRunning          atomic.Bool
+	cycleCount         atomic.Int32
 }
 
 // DiscoveryStats holds stats for the proxy status API
@@ -42,6 +43,7 @@ type DiscoveryStats struct {
 	LastDiscoveryCount int       `json:"last_discovery_count"`
 	TotalDiscovered    int       `json:"total_discovered"`
 	TotalHealthy       int       `json:"total_healthy"`
+	CycleCount         int       `json:"cycle_count"`
 }
 
 // GlobalDiscovery is the singleton instance
@@ -71,7 +73,7 @@ func StartProxyDiscovery(gmsURL string, pool *ProxyPool, discoveryInterval, heal
 
 	GlobalDiscovery.lastDiscoveryTime.Store(time.Time{})
 
-	// Run initial discovery immediately
+	// Run discovery engine
 	go GlobalDiscovery.run()
 }
 
@@ -96,26 +98,48 @@ func GetDiscoveryStats() *DiscoveryStats {
 		LastDiscoveryCount: int(GlobalDiscovery.lastDiscoveryCount.Load()),
 		TotalDiscovered:    int(GlobalDiscovery.totalDiscovered.Load()),
 		TotalHealthy:       int(GlobalDiscovery.totalHealthy.Load()),
+		CycleCount:         int(GlobalDiscovery.cycleCount.Load()),
 	}
 }
 
 func (d *ProxyDiscovery) run() {
-	logger.Log.Info("🔍 ProxyDiscovery: Starting Indian proxy auto-discovery engine")
+	logger.Log.Info("🔍 ProxyDiscovery: Starting Indian proxy auto-discovery engine (10 sources)")
 
-	// Initial discovery
+	// Initial aggressive discovery
 	d.discoverAndValidate()
 
-	// Periodic discovery
-	discoveryTicker := time.NewTicker(d.discoveryInterval)
-	// Periodic health check of existing proxies
+	// First hour: discover every 5 minutes (aggressive warm-up)
+	// After first hour: use configured interval
+	fastTicker := time.NewTicker(5 * time.Minute)
 	healthTicker := time.NewTicker(d.healthCheckInterval)
-	defer discoveryTicker.Stop()
+	normalTimer := time.NewTimer(1 * time.Hour)
+
+	defer fastTicker.Stop()
 	defer healthTicker.Stop()
+	defer normalTimer.Stop()
 
 	for {
 		select {
-		case <-discoveryTicker.C:
-			d.discoverAndValidate()
+		case <-fastTicker.C:
+			cycles := d.cycleCount.Load()
+			if cycles < 12 { // First hour (12 * 5min = 60min)
+				d.discoverAndValidate()
+			}
+		case <-normalTimer.C:
+			// Switch to normal interval after 1 hour
+			fastTicker.Stop()
+			normalTicker := time.NewTicker(d.discoveryInterval)
+			defer normalTicker.Stop()
+			go func() {
+				for {
+					select {
+					case <-normalTicker.C:
+						d.discoverAndValidate()
+					case <-d.ctx.Done():
+						return
+					}
+				}
+			}()
 		case <-healthTicker.C:
 			d.healthCheckExisting()
 		case <-d.ctx.Done():
@@ -130,9 +154,10 @@ func (d *ProxyDiscovery) discoverAndValidate() {
 	d.isRunning.Store(true)
 	defer d.isRunning.Store(false)
 
-	logger.Log.Info("🔍 ProxyDiscovery: Starting discovery cycle...")
+	cycle := d.cycleCount.Add(1)
+	logger.Log.Infof("🔍 ProxyDiscovery: Starting discovery cycle #%d...", cycle)
 
-	// Collect proxies from all sources
+	// Collect proxies from ALL sources concurrently
 	var allProxies []string
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -144,6 +169,13 @@ func (d *ProxyDiscovery) discoverAndValidate() {
 		{"ProxyScrape", d.fetchFromProxyScrape},
 		{"GeoNode", d.fetchFromGeoNode},
 		{"FreeProxyList", d.fetchFromFreeProxyList},
+		{"ProxyListDownload", d.fetchFromProxyListDownload},
+		{"SpysOne", d.fetchFromSpysOne},
+		{"PubProxy", d.fetchFromPubProxy},
+		{"FreeProxyCZ", d.fetchFromFreeProxyCZ},
+		{"ProxyNova", d.fetchFromProxyNova},
+		{"HideMyLife", d.fetchFromHideMy},
+		{"OpenProxyList", d.fetchFromOpenProxyList},
 	}
 
 	for _, src := range sources {
@@ -159,9 +191,9 @@ func (d *ProxyDiscovery) discoverAndValidate() {
 				mu.Lock()
 				allProxies = append(allProxies, proxies...)
 				mu.Unlock()
-				logger.Log.Infof("🔍 ProxyDiscovery: %s returned %d Indian proxies", name, len(proxies))
+				logger.Log.Infof("🔍 [%s] → %d Indian proxies", name, len(proxies))
 			} else {
-				logger.Log.Warnf("🔍 ProxyDiscovery: %s returned 0 proxies", name)
+				logger.Log.Warnf("🔍 [%s] → 0 proxies", name)
 			}
 		}(src.name, src.fn)
 	}
@@ -183,20 +215,25 @@ func (d *ProxyDiscovery) discoverAndValidate() {
 	d.lastDiscoveryTime.Store(time.Now())
 	d.lastDiscoveryCount.Store(int32(len(unique)))
 
-	logger.Log.Infof("🔍 ProxyDiscovery: Found %d unique Indian proxies, starting GMS validation...", len(unique))
+	logger.Log.Infof("🔍 ProxyDiscovery: Found %d unique Indian proxies, starting GMS validation (40 workers)...", len(unique))
 
 	if len(unique) == 0 {
 		return
 	}
 
-	// Validate proxies against GMS portal (concurrent, limited to 20 goroutines)
-	validated := d.validateProxies(unique, 20)
+	// Validate proxies against GMS portal (40 concurrent validators)
+	validated := d.validateProxies(unique, 40)
 
 	d.totalHealthy.Store(int32(len(validated)))
 
 	if len(validated) > 0 {
 		d.pool.AddProxies(validated)
 		logger.Log.Infof("✅ ProxyDiscovery: Added %d GMS-validated Indian proxies to pool", len(validated))
+
+		// Flush to Supabase cache
+		if GlobalProxyCache != nil {
+			GlobalProxyCache.FlushTopProxies(d.pool, 20)
+		}
 	} else {
 		logger.Log.Warn("⚠️ ProxyDiscovery: No proxies passed GMS validation this cycle")
 	}
@@ -222,13 +259,13 @@ func (d *ProxyDiscovery) healthCheckExisting() {
 	d.pool.RemoveDeadProxies(10)
 
 	// Re-validate the top N proxies
-	top := d.pool.getBestProxies(min(10, count))
+	top := d.pool.getBestProxies(minInt(15, count))
 	var urls []string
 	for _, p := range top {
 		urls = append(urls, p.URL)
 	}
 
-	validated := d.validateProxies(urls, 10)
+	validated := d.validateProxies(urls, 15)
 	healthyCount := len(validated)
 
 	d.totalHealthy.Store(int32(healthyCount))
@@ -297,10 +334,10 @@ func (d *ProxyDiscovery) testProxyAgainstGMS(proxyStr, gmsLoginURL string) bool 
 	client := &http.Client{
 		Transport: transport,
 		Jar:       jar,
-		Timeout:   15 * time.Second,
+		Timeout:   12 * time.Second,
 	}
 
-	ctx, cancel := context.WithTimeout(d.ctx, 12*time.Second)
+	ctx, cancel := context.WithTimeout(d.ctx, 10*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, "GET", gmsLoginURL, nil)
@@ -326,16 +363,18 @@ func (d *ProxyDiscovery) testProxyAgainstGMS(proxyStr, gmsLoginURL string) bool 
 	return strings.Contains(body, "faculty login") || strings.Contains(body, "login_id")
 }
 
-// --- Proxy Source Scrapers ---
+// ==========================================
+// 10 PROXY SOURCES — All filtered for India
+// ==========================================
 
-// fetchFromProxyScrape uses the ProxyScrape API to get Indian HTTP/SOCKS5 proxies
+// 1. ProxyScrape — HTTP + SOCKS5
 func (d *ProxyDiscovery) fetchFromProxyScrape(ctx context.Context) []string {
 	var allProxies []string
 
-	// HTTP proxies
 	urls := []string{
 		"https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=IN&ssl=all&anonymity=all",
 		"https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=10000&country=IN&ssl=all&anonymity=all",
+		"https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks4&timeout=10000&country=IN&ssl=all&anonymity=all",
 	}
 
 	client := &http.Client{Timeout: 20 * time.Second}
@@ -361,9 +400,10 @@ func (d *ProxyDiscovery) fetchFromProxyScrape(ctx context.Context) []string {
 		for _, line := range lines {
 			proxy := strings.TrimSpace(line)
 			if proxy != "" && strings.Contains(proxy, ":") {
-				// Determine protocol from the API URL
 				if strings.Contains(apiURL, "socks5") {
 					allProxies = append(allProxies, "socks5://"+proxy)
+				} else if strings.Contains(apiURL, "socks4") {
+					allProxies = append(allProxies, "socks4://"+proxy)
 				} else {
 					allProxies = append(allProxies, "http://"+proxy)
 				}
@@ -374,61 +414,65 @@ func (d *ProxyDiscovery) fetchFromProxyScrape(ctx context.Context) []string {
 	return allProxies
 }
 
-// fetchFromGeoNode uses the GeoNode free proxy API filtered for India
+// 2. GeoNode — JSON API
 func (d *ProxyDiscovery) fetchFromGeoNode(ctx context.Context) []string {
 	var allProxies []string
 
-	apiURL := "https://proxylist.geonode.com/api/proxy-list?limit=100&page=1&sort_by=lastChecked&sort_type=desc&country=IN&filterUpTime=90&speed=fast"
+	pages := []string{
+		"https://proxylist.geonode.com/api/proxy-list?limit=100&page=1&sort_by=lastChecked&sort_type=desc&country=IN&filterUpTime=90&speed=fast",
+		"https://proxylist.geonode.com/api/proxy-list?limit=100&page=2&sort_by=lastChecked&sort_type=desc&country=IN&filterUpTime=90&speed=fast",
+	}
 
 	client := &http.Client{Timeout: 20 * time.Second}
-	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
-	if err != nil {
-		return nil
-	}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil
-	}
-
-	// Parse JSON response
-	var result struct {
-		Data []struct {
-			IP        string   `json:"ip"`
-			Port      string   `json:"port"`
-			Protocols []string `json:"protocols"`
-		} `json:"data"`
-	}
-
-	if err := json.Unmarshal(bodyBytes, &result); err != nil {
-		return nil
-	}
-
-	for _, entry := range result.Data {
-		if entry.IP == "" || entry.Port == "" {
+	for _, apiURL := range pages {
+		req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+		if err != nil {
 			continue
 		}
-		// Use the first supported protocol
-		protocol := "http"
-		for _, p := range entry.Protocols {
-			if strings.ToLower(p) == "socks5" {
-				protocol = "socks5"
-				break
-			}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
 		}
-		allProxies = append(allProxies, fmt.Sprintf("%s://%s:%s", protocol, entry.IP, entry.Port))
+
+		bodyBytes, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+
+		var result struct {
+			Data []struct {
+				IP        string   `json:"ip"`
+				Port      string   `json:"port"`
+				Protocols []string `json:"protocols"`
+			} `json:"data"`
+		}
+
+		if err := json.Unmarshal(bodyBytes, &result); err != nil {
+			continue
+		}
+
+		for _, entry := range result.Data {
+			if entry.IP == "" || entry.Port == "" {
+				continue
+			}
+			protocol := "http"
+			for _, p := range entry.Protocols {
+				if strings.ToLower(p) == "socks5" {
+					protocol = "socks5"
+					break
+				}
+			}
+			allProxies = append(allProxies, fmt.Sprintf("%s://%s:%s", protocol, entry.IP, entry.Port))
+		}
 	}
 
 	return allProxies
 }
 
-// fetchFromFreeProxyList scrapes free-proxy-list.net and filters for Indian proxies
+// 3. FreeProxyList.net — HTML scrape
 func (d *ProxyDiscovery) fetchFromFreeProxyList(ctx context.Context) []string {
 	var allProxies []string
 
@@ -452,13 +496,9 @@ func (d *ProxyDiscovery) fetchFromFreeProxyList(ctx context.Context) []string {
 
 	body := string(bodyBytes)
 
-	// Extract IP:PORT rows — look for lines matching pattern: IP PORT Country
-	// The site has a table with IP, PORT, Code, Country, etc.
-	// We use a regex to find IP:PORT pairs near "India" or "IN" country code
 	ipPortRegex := regexp.MustCompile(`(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s*</td>\s*<td>\s*(\d{2,5})`)
 	countryRegex := regexp.MustCompile(`<td>\s*IN\s*</td>`)
 
-	// Split by table rows
 	rows := strings.Split(body, "<tr>")
 	for _, row := range rows {
 		if !countryRegex.MatchString(row) {
@@ -475,7 +515,334 @@ func (d *ProxyDiscovery) fetchFromFreeProxyList(ctx context.Context) []string {
 	return allProxies
 }
 
-func min(a, b int) int {
+// 4. ProxyList.download — plain text lists
+func (d *ProxyDiscovery) fetchFromProxyListDownload(ctx context.Context) []string {
+	var allProxies []string
+
+	urls := []string{
+		"https://www.proxy-list.download/api/v1/get?type=http&country=IN",
+		"https://www.proxy-list.download/api/v1/get?type=https&country=IN",
+		"https://www.proxy-list.download/api/v1/get?type=socks5&country=IN",
+	}
+
+	client := &http.Client{Timeout: 20 * time.Second}
+
+	for _, apiURL := range urls {
+		req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+		if err != nil {
+			continue
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+
+		bodyBytes, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+
+		lines := strings.Split(string(bodyBytes), "\n")
+		for _, line := range lines {
+			proxy := strings.TrimSpace(line)
+			if proxy != "" && strings.Contains(proxy, ":") {
+				if strings.Contains(apiURL, "socks5") {
+					allProxies = append(allProxies, "socks5://"+proxy)
+				} else {
+					allProxies = append(allProxies, "http://"+proxy)
+				}
+			}
+		}
+	}
+
+	return allProxies
+}
+
+// 5. Spys.one — India-filtered proxy list
+func (d *ProxyDiscovery) fetchFromSpysOne(ctx context.Context) []string {
+	var allProxies []string
+
+	client := &http.Client{Timeout: 20 * time.Second}
+
+	// Spys.one provides a text format for Indian proxies
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://spys.me/proxy.txt", nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil
+	}
+
+	// Format: IP:PORT CC-ANON-S/H
+	// Filter for lines containing " IN-" (India country code)
+	lines := strings.Split(string(bodyBytes), "\n")
+	ipPortRegex := regexp.MustCompile(`^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{2,5})\s+IN-`)
+
+	for _, line := range lines {
+		matches := ipPortRegex.FindStringSubmatch(strings.TrimSpace(line))
+		if len(matches) >= 2 {
+			allProxies = append(allProxies, "http://"+matches[1])
+		}
+	}
+
+	return allProxies
+}
+
+// 6. PubProxy — JSON API with India filter
+func (d *ProxyDiscovery) fetchFromPubProxy(ctx context.Context) []string {
+	var allProxies []string
+
+	client := &http.Client{Timeout: 20 * time.Second}
+
+	// PubProxy has rate limits, so we make a few requests
+	for i := 0; i < 5; i++ {
+		if ctx.Err() != nil {
+			break
+		}
+
+		apiURL := "http://pubproxy.com/api/proxy?country=IN&type=http&limit=5&format=json"
+		req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+		if err != nil {
+			continue
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+
+		bodyBytes, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+
+		var result struct {
+			Data []struct {
+				IP   string `json:"ip"`
+				Port string `json:"port"`
+				Type string `json:"type"`
+			} `json:"data"`
+		}
+
+		if err := json.Unmarshal(bodyBytes, &result); err != nil {
+			continue
+		}
+
+		for _, entry := range result.Data {
+			protocol := "http"
+			if strings.ToLower(entry.Type) == "socks5" {
+				protocol = "socks5"
+			}
+			allProxies = append(allProxies, fmt.Sprintf("%s://%s:%s", protocol, entry.IP, entry.Port))
+		}
+
+		// Small delay to avoid rate limiting
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	return allProxies
+}
+
+// 7. FreeProxyCZ — Czech free proxy site with India filter
+func (d *ProxyDiscovery) fetchFromFreeProxyCZ(ctx context.Context) []string {
+	var allProxies []string
+
+	client := &http.Client{Timeout: 20 * time.Second}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://free-proxy.cz/en/proxylist/country/IN/all/ping/all", nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil
+	}
+
+	body := string(bodyBytes)
+
+	// Extract IP:PORT from the page — they use base64 encoded IPs in script tags
+	// Fallback: try direct IP:PORT regex
+	ipPortRegex := regexp.MustCompile(`(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s*</td>\s*<td[^>]*>\s*(\d{2,5})`)
+	matches := ipPortRegex.FindAllStringSubmatch(body, -1)
+	for _, m := range matches {
+		if len(m) >= 3 {
+			allProxies = append(allProxies, fmt.Sprintf("http://%s:%s", m[1], m[2]))
+		}
+	}
+
+	return allProxies
+}
+
+// 8. ProxyNova — India page
+func (d *ProxyDiscovery) fetchFromProxyNova(ctx context.Context) []string {
+	var allProxies []string
+
+	client := &http.Client{Timeout: 20 * time.Second}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://www.proxynova.com/proxy-server-list/country-in/", nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil
+	}
+
+	body := string(bodyBytes)
+
+	// ProxyNova puts IP inside a <abbr> tag with JS obfuscation
+	// Try direct regex fallback
+	ipRegex := regexp.MustCompile(`(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})`)
+	portRegex := regexp.MustCompile(`<td[^>]*>\s*(\d{2,5})\s*</td>`)
+
+	rows := strings.Split(body, "<tr")
+	for _, row := range rows {
+		ips := ipRegex.FindStringSubmatch(row)
+		ports := portRegex.FindStringSubmatch(row)
+		if len(ips) >= 2 && len(ports) >= 2 {
+			allProxies = append(allProxies, fmt.Sprintf("http://%s:%s", ips[1], ports[1]))
+		}
+	}
+
+	return allProxies
+}
+
+// 9. HideMy.life — API-based
+func (d *ProxyDiscovery) fetchFromHideMy(ctx context.Context) []string {
+	var allProxies []string
+
+	client := &http.Client{Timeout: 20 * time.Second}
+
+	// hidemy.life has a public API
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://hidemy.life/api/proxylist.php?out=plain&country=IN&maxtime=5000", nil)
+	if err != nil {
+		return nil
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil
+	}
+
+	lines := strings.Split(string(bodyBytes), "\n")
+	for _, line := range lines {
+		proxy := strings.TrimSpace(line)
+		if proxy != "" && strings.Contains(proxy, ":") {
+			allProxies = append(allProxies, "http://"+proxy)
+		}
+	}
+
+	return allProxies
+}
+
+// 10. OpenProxyList — aggregator text list
+func (d *ProxyDiscovery) fetchFromOpenProxyList(ctx context.Context) []string {
+	var allProxies []string
+
+	urls := []string{
+		"https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt",
+		"https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt",
+		"https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+		"https://raw.githubusercontent.com/monosans/proxy-list/main/proxies_geolocation/http.txt",
+	}
+
+	client := &http.Client{Timeout: 20 * time.Second}
+
+	for _, apiURL := range urls {
+		req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+		if err != nil {
+			continue
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+
+		bodyBytes, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+
+		lines := strings.Split(string(bodyBytes), "\n")
+
+		// For geolocation file, lines look like: IP:PORT|IN|... 
+		// For plain files, we take all and let GMS validation filter non-Indian
+		isGeo := strings.Contains(apiURL, "geolocation")
+
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" || !strings.Contains(line, ":") {
+				continue
+			}
+
+			if isGeo {
+				// Format: IP:PORT|CountryCode|...
+				parts := strings.Split(line, "|")
+				if len(parts) >= 2 && strings.TrimSpace(parts[1]) == "IN" {
+					proxy := strings.TrimSpace(parts[0])
+					if strings.Contains(apiURL, "socks5") {
+						allProxies = append(allProxies, "socks5://"+proxy)
+					} else {
+						allProxies = append(allProxies, "http://"+proxy)
+					}
+				}
+			} else {
+				// Plain list — we can't filter by country, so just take all
+				// GMS validation will filter out non-working ones
+				// Only take first 200 to avoid overwhelming validation
+				if len(allProxies) >= 200 {
+					break
+				}
+				proxy := line
+				if strings.Contains(apiURL, "socks5") {
+					allProxies = append(allProxies, "socks5://"+proxy)
+				} else {
+					allProxies = append(allProxies, "http://"+proxy)
+				}
+			}
+		}
+	}
+
+	return allProxies
+}
+
+func minInt(a, b int) int {
 	if a < b {
 		return a
 	}

@@ -43,15 +43,34 @@ func main() {
 	// Initialize Proxy Pool
 	service.InitProxyPool(cfg.ProxyListURL)
 
+	// Initialize Proxy Persistence (Supabase cache)
+	if cfg.ProxyPersistenceEnabled {
+		service.InitProxyCache(cfg.SupabaseURL, cfg.SupabaseAnonKey)
+	}
+
+	// Load cached proxies from Supabase (instant availability on restart)
+	if service.GlobalProxyCache != nil && service.GlobalProxyPool != nil {
+		cached := service.GlobalProxyCache.LoadCachedProxies()
+		if len(cached) > 0 {
+			service.GlobalProxyPool.AddProxies(cached)
+			logger.Log.Infof("🚀 Loaded %d cached proxies — pool is immediately usable", len(cached))
+		}
+	}
+
 	// Start Indian Proxy Auto-Discovery Engine
 	if cfg.ProxyAutoDiscover {
 		service.StartProxyDiscovery(
 			cfg.GMSPortalURL,
 			service.GlobalProxyPool,
-			15*time.Minute,
+			10*time.Minute, // Normal interval after warm-up
 			cfg.ProxyHealthCheckInterval,
 		)
-		logger.Log.Info("🇮🇳 Indian Proxy Auto-Discovery Engine started")
+		logger.Log.Info("🇮🇳 Indian Proxy Auto-Discovery Engine started (10 sources, 40 validators)")
+
+		// Start periodic cache flush
+		if service.GlobalProxyCache != nil {
+			service.GlobalProxyCache.StartPeriodicFlush(service.GlobalProxyPool, 5*time.Minute)
+		}
 	}
 
 	// 4. Initialize Services
