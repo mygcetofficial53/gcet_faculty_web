@@ -140,18 +140,12 @@ func (s *GMSScraper) Login(username, password string) (*models.Faculty, error) {
 	s.username = username
 	s.password = password
 
-	logger.Log.Infof("GMS Scraper: Starting login for %s", username)
+	logger.Log.Infof("GMS Scraper: Starting FAST login for %s", username)
 
 	// MD5 hash the password (GMS portal JavaScript does calcMD5(pass))
 	passwordMD5 := fmt.Sprintf("%x", md5.Sum([]byte(password)))
 
-	// Step 1: GET login page to establish session cookies
-	_, err := s.doGet(s.loginPageURL())
-	if err != nil {
-		return nil, fmt.Errorf("failed to load login page: %w", err)
-	}
-
-	// Step 2: POST login form using racing engine
+	// Step 1: POST login form directly using racing engine
 	form := url.Values{
 		"login_id": {username},
 		"pass":     {passwordMD5},
@@ -175,9 +169,12 @@ func (s *GMSScraper) Login(username, password string) (*models.Faculty, error) {
 		strings.Contains(bodyLower, "faculty")
 
 	if isLoggedIn {
-		faculty, err := s.scrapeProfile(username)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scrape profile: %w", err)
+		// FAST LOGIN: Skip profile scraping (saves 1-3 seconds)
+		// We return a basic profile. The cosmetic name will just be "Faculty".
+		faculty := &models.Faculty{
+			ID:      fmt.Sprintf("%d", time.Now().UnixMilli()),
+			LoginID: username,
+			Name:    "Faculty",
 		}
 		return faculty, nil
 	}
@@ -187,9 +184,10 @@ func (s *GMSScraper) Login(username, password string) (*models.Faculty, error) {
 	if err == nil {
 		testBodyLower := strings.ToLower(testBody)
 		if strings.Contains(testBodyLower, "upload") && strings.Contains(testBodyLower, "material") && !strings.Contains(testBodyLower, "faculty login") {
-			faculty, err := s.scrapeProfile(username)
-			if err != nil {
-				return nil, fmt.Errorf("failed to scrape profile: %w", err)
+			faculty := &models.Faculty{
+				ID:      fmt.Sprintf("%d", time.Now().UnixMilli()),
+				LoginID: username,
+				Name:    "Faculty",
 			}
 			return faculty, nil
 		}
