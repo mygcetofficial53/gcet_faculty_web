@@ -213,9 +213,9 @@ func makeProxyClient(proxyStr string, jar http.CookieJar, timeout time.Duration)
 	transport.ForceAttemptHTTP2 = false
 	transport.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
 
-	// Ensure we don't wait forever for dead proxies
-	if timeout > 8*time.Second {
-		timeout = 8 * time.Second
+	// Ensure we don't wait forever for dead proxies, but allow enough time for slow Indian proxies
+	if timeout > 20*time.Second {
+		timeout = 20 * time.Second
 	}
 
 	return &http.Client{
