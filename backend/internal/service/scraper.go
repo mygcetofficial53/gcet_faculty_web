@@ -1141,6 +1141,8 @@ func (s *GMSScraper) SubmitAttendance(req *models.SubmitAttendanceRequest) (bool
 		bodyParts = append(bodyParts, "enrollment_no="+url.QueryEscape(student.Enrollment+",true,false"))
 		if student.IsPresent {
 			bodyParts = append(bodyParts, "enrollment_status=true")
+		} else {
+			bodyParts = append(bodyParts, "enrollment_status=false")
 		}
 	}
 
