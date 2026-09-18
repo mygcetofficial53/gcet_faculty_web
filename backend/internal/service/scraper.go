@@ -903,36 +903,9 @@ func (s *GMSScraper) FetchStudentList(courseCode, date string, byLibID bool, isE
 		baseURL = s.editAttendanceURL()
 	}
 
-	// Step 1: GET page to prime session
-	getBody, err := s.getWithRetry(baseURL)
-	if err != nil {
-		return nil, err
-	}
-
-	getDoc, err := goquery.NewDocumentFromReader(strings.NewReader(getBody))
-	if err != nil {
-		return nil, err
-	}
-
-	// Find raw option value
+	// FAST PATH: We expect courseCode to already be the raw_value from the courses list.
+	// We no longer fetch the GET page to parse the raw_value.
 	matchedRawValue := courseCode
-	getDoc.Find(`select[name="course_code"] option`).Each(func(_ int, opt *goquery.Selection) {
-		val := opt.AttrOr("value", "")
-		if val == "" || val == "select" {
-			return
-		}
-		codeOnly := courseCode
-		if idx := strings.Index(courseCode, ","); idx >= 0 {
-			codeOnly = strings.TrimSpace(courseCode[:idx])
-		}
-		valCode := val
-		if idx := strings.Index(val, ","); idx >= 0 {
-			valCode = strings.TrimSpace(val[:idx])
-		}
-		if valCode == codeOnly {
-			matchedRawValue = val
-		}
-	})
 
 	// Step 2: Build form data
 	form := url.Values{
@@ -1029,36 +1002,9 @@ func (s *GMSScraper) FetchStudentList(courseCode, date string, byLibID bool, isE
 
 // SubmitAttendance enters new attendance on the portal
 func (s *GMSScraper) SubmitAttendance(req *models.SubmitAttendanceRequest) (bool, error) {
-	// Step 1: GET enter attendance page
-	getBody, err := s.getWithRetry(s.enterAttendanceURL())
-	if err != nil {
-		return false, err
-	}
-
-	getDoc, err := goquery.NewDocumentFromReader(strings.NewReader(getBody))
-	if err != nil {
-		return false, err
-	}
-
-	// Find raw value
+	// FAST PATH: We expect req.CourseCode to already be the raw_value from the courses list.
+	// We no longer fetch the GET page to parse the raw_value.
 	matchedRawValue := req.CourseCode
-	getDoc.Find(`select[name="course_code"] option`).Each(func(_ int, opt *goquery.Selection) {
-		val := opt.AttrOr("value", "")
-		if val == "" || val == "select" {
-			return
-		}
-		codeOnly := req.CourseCode
-		if idx := strings.Index(req.CourseCode, ","); idx >= 0 {
-			codeOnly = strings.TrimSpace(req.CourseCode[:idx])
-		}
-		valCode := val
-		if idx := strings.Index(val, ","); idx >= 0 {
-			valCode = strings.TrimSpace(val[:idx])
-		}
-		if valCode == codeOnly {
-			matchedRawValue = val
-		}
-	})
 
 	// Build course form data
 	courseForm := url.Values{

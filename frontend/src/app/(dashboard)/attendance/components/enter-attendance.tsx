@@ -174,7 +174,7 @@ export default function EnterAttendance() {
     mutationFn: async () => {
       const course = courses.find((c: any) => c.raw_value === selectedCourse);
       const res = await api.post("/attendance/students", {
-        course_code: course.course_code,
+        course_code: course.raw_value, // FAST PATH: Send raw_value directly
         date: date,
         by_lib_id: false,
         is_edit: false,
